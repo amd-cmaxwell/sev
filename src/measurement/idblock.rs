@@ -19,17 +19,14 @@ use crate::{
 };
 
 /// Generate an AUTH-BLOCK using 2 EC P-384 keys and an already calculated ID-BlOCK
-pub fn gen_id_auth_block(
+pub fn gen_id_auth_block_with_keys(
     id_block: &IdBlock,
-    id_key_file: PathBuf,
-    author_key_file: PathBuf,
+    id_ec_pub_key: SevEcdsaPubKey,
+    author_ec_priv_key: EcKey<Private>,
 ) -> Result<IdAuth, IdBlockError> {
-    let id_ec_priv_key = load_priv_key(id_key_file)?;
-    let id_ec_pub_key = SevEcdsaPubKey::try_from(&id_ec_priv_key)?;
     let serialized_id_block = id_block.to_bytes()?;
     let id_sig = SevEcdsaSig::try_from((id_ec_priv_key, serialized_id_block.as_slice()))?;
 
-    let author_ec_priv_key = load_priv_key(author_key_file)?;
     let author_pub_key = SevEcdsaPubKey::try_from(&author_ec_priv_key)?;
     let author_sig =
         SevEcdsaSig::try_from((author_ec_priv_key, id_ec_pub_key.to_bytes()?.as_slice()))?;
@@ -42,6 +39,28 @@ pub fn gen_id_auth_block(
         author_sig,
         author_pub_key,
     ))
+}
+
+/// Generate an AUTH-BLOCK using 2 EC P-384 keys and an already calculated ID-BlOCK
+pub fn gen_id_auth_block_from_pubkey(
+    id_block: &IdBlock,
+    id_ec_pub_key: SevEcdsaPubKey,
+    author_key_file: PathBuf,
+) -> Result<IdAuth, IdBlockError> {
+    let author_ec_priv_key = load_priv_key(author_key_file)?;
+    let author_pub_key = SevEcdsaPubKey::try_from(&author_ec_priv_key)?;
+    gen_id_auth_block_with_keys(id_block, id_ec_pub_key, author_ec_priv_key)
+}
+
+/// Generate an AUTH-BLOCK using 2 EC P-384 keys and an already calculated ID-BlOCK
+pub fn gen_id_auth_block(
+    id_block: &IdBlock,
+    id_key_file: PathBuf,
+    author_key_file: PathBuf,
+) -> Result<IdAuth, IdBlockError> {
+    let id_ec_priv_key = load_priv_key(id_key_file)?;
+    let id_ec_pub_key = SevEcdsaPubKey::try_from(&id_ec_priv_key)?;
+    gen_id_auth_block_from_pubkey(id_block, id_ec_pub_key, author_key_file)
 }
 
 enum KeyFormat {
