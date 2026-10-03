@@ -22,6 +22,7 @@ use std::{
     str::FromStr,
 };
 
+use hex::FromHex;
 use uuid::{uuid, Uuid};
 
 use crate::error::*;
@@ -31,7 +32,7 @@ use crate::util::parser_helper::{ReadExt, WriteExt};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
-type Sha256Hash = [u8; 32];
+pub type Sha256Hash = [u8; 32];
 
 /// GUID stored as little endian
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
@@ -269,7 +270,7 @@ pub fn get_cmdline_hash(append: Option<&str>) -> Sha256Hash {
 }
 
 /// Generates hash from user provided initrd file
-pub fn get_initrd_hash(initrd: Option<Pathbuf>) -> Result<Sha256Hash> {
+pub fn get_initrd_hash(initrd: Option<PathBuf>) -> Result<Sha256Hash, MeasurementError> {
     let initrd_data = match initrd {
         Some(path) => {
             let mut initrd_file = File::open(path)?;
@@ -279,15 +280,48 @@ pub fn get_initrd_hash(initrd: Option<Pathbuf>) -> Result<Sha256Hash> {
         }
         None => Vec::new(),
     };
-    sha256(&initrd_data)
+    Ok(sha256(&initrd_data))
 }
 
 /// Generates hash from user provided kernel file
-pub fn get_kernel_hash(kernel: PathBuf) -> Result<Sha256Hash> {
+pub fn get_kernel_hash(kernel: PathBuf) -> Result<Sha256Hash, MeasurementError> {
     let mut kernel_file = File::open(kernel)?;
     let mut kernel_data = Vec::new();
     kernel_file.read_to_end(&mut kernel_data)?;
-    sha256(&kernel_data)
+    Ok(sha256(&kernel_data))
+}
+
+impl<'a> TryFrom<&crate::measurement::snp::SnpMeasurementArgs<'a>> for Option<SevHashes> {
+    type Error = MeasurementError;
+
+    fn try_from(
+        args: &crate::measurement::snp::SnpMeasurementArgs<'a>,
+    ) -> Result<Self, MeasurementError> {
+        let base = match (args.kernel_hash_str, &args.kernel_file) {
+            (Some(hash), _) => {
+                let hash: Sha256Hash = Vec::from_hex(hash)?
+                    .try_into()
+                    .map_err(|_| MeasurementError::InvalidHashLength)?;
+                Some(SevHashes::default().kernel_hash(hash))
+            }
+            (None, Some(file)) => Some(SevHashes::default().kernel(file.clone())?),
+            (None, None) => None,
+        };
+
+        base.map(|sev_hashes| -> Result<_, MeasurementError> {
+            let sev_hashes = match args.initrd_hash_str {
+                Some(hash) => {
+                    let hash: Sha256Hash = Vec::from_hex(hash)?
+                        .try_into()
+                        .map_err(|_| MeasurementError::InvalidHashLength)?;
+                    sev_hashes.initrd_hash(hash)
+                }
+                None => sev_hashes.initrd(args.initrd_file.clone())?,
+            };
+            Ok(sev_hashes.cmdline(args.append))
+        })
+        .transpose()
+    }
 }
 
 impl SevHashes {
@@ -305,37 +339,37 @@ impl SevHashes {
     }
 
     /// Sets kernel_hash to the provided value
-    pub fn kernel_hash(&mut self, kernel_hash: Sha256Hash) -> &mut Self {
+    pub fn kernel_hash(mut self, kernel_hash: Sha256Hash) -> Self {
         self.kernel_hash = kernel_hash;
         self
     }
 
     /// Sets initrd_hash to the provided value
-    pub fn initrd_hash(&mut self, initrd_hash: Sha256Hash) -> &mut Self {
+    pub fn initrd_hash(mut self, initrd_hash: Sha256Hash) -> Self {
         self.initrd_hash = initrd_hash;
         self
     }
 
     /// Sets cmdline_hash to the provided value
-    pub fn cmdline_hash(&mut self, cmdline_hash: Sha256Hash) -> &mut Self {
+    pub fn cmdline_hash(mut self, cmdline_hash: Sha256Hash) -> Self {
         self.cmdline_hash = cmdline_hash;
         self
     }
 
     /// Generates hash from user provided kernel file
-    pub fn kernel(&mut self, kernel: PathBuf) -> Result<&mut Self>{
-        self.kernel_hash = get_kernel_hash(kernel);
-        self
+    pub fn kernel(mut self, kernel: PathBuf) -> Result<Self, MeasurementError> {
+        self.kernel_hash = get_kernel_hash(kernel)?;
+        Ok(self)
     }
 
     /// Generates hash from user provided initrd file
-    pub fn initrd(&mut self, initrd: Option<PathBuf>) -> Result<&mut Self>{
-        self.initrd_hash = get_initrd_hash(initrd);
-        self
+    pub fn initrd(mut self, initrd: Option<PathBuf>) -> Result<Self, MeasurementError> {
+        self.initrd_hash = get_initrd_hash(initrd)?;
+        Ok(self)
     }
 
     /// Generates hash from user provided cmdline
-    pub fn cmdline(&mut self, append: Option<&str>) -> &mut Self{
+    pub fn cmdline(mut self, append: Option<&str>) -> Self {
         self.cmdline_hash = get_cmdline_hash(append);
         self
     }

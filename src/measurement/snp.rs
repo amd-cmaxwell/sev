@@ -226,13 +226,17 @@ pub struct SnpMeasurementArgs<'a> {
     pub ovmf_hash_str: Option<&'a str>,
     /// vmm type
     pub vmm_type: Option<VMMType>,
+    /// Already calculated kernel hash
+    pub kernel_hash_str: Option<&'a str>,
+    /// Already calculated initrd hash
+    pub initrd_hash_str: Option<&'a str>,
 }
 
 /// Calulate an SEV-SNP launch digest
 pub fn snp_calc_launch_digest(
     snp_measurement: SnpMeasurementArgs,
 ) -> Result<SnpLaunchDigest, MeasurementError> {
-    let ovmf = OVMF::new(snp_measurement.ovmf_file)?;
+    let ovmf = OVMF::new(snp_measurement.ovmf_file.clone())?;
 
     let mut gctx: Gctx<Updating> = match snp_measurement.ovmf_hash_str {
         Some(hash) => {
@@ -248,14 +252,7 @@ pub fn snp_calc_launch_digest(
         }
     };
 
-    let sev_hashes = match snp_measurement.kernel_file {
-        Some(kernel) => Some(SevHashes::new(
-            kernel,
-            snp_measurement.initrd_file,
-            snp_measurement.append,
-        )?),
-        _ => None,
-    };
+    let sev_hashes: Option<SevHashes> = Option::try_from(&snp_measurement)?;
 
     let official_vmm_type = match snp_measurement.vmm_type {
         Some(vmm) => vmm,

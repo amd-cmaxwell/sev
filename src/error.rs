@@ -1023,6 +1023,9 @@ pub enum MeasurementError {
 
     /// OVMF is missing required section with kernel specified
     MissingSection(String),
+
+    /// Hash string decoded to wrong length
+    InvalidHashLength,
 }
 
 impl std::fmt::Display for MeasurementError {
@@ -1059,6 +1062,9 @@ impl std::fmt::Display for MeasurementError {
                 f,
                 "Kernel specified but OVMF metadata doesn't include {section} section"
             ),
+            MeasurementError::InvalidHashLength => {
+                write!(f, "Hash string decoded to unexpected length (expected 32 bytes)")
+            }
         }
     }
 }
