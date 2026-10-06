@@ -19,14 +19,17 @@ use crate::{
 };
 
 /// Generate an AUTH-BLOCK using 2 EC P-384 keys and an already calculated ID-BlOCK
-pub fn gen_id_auth_block_with_keys(
+pub fn gen_id_auth_block(
     id_block: &IdBlock,
-    id_ec_pub_key: SevEcdsaPubKey,
-    author_ec_priv_key: EcKey<Private>,
+    id_key_file: PathBuf,
+    author_key_file: PathBuf,
 ) -> Result<IdAuth, IdBlockError> {
+    let id_ec_priv_key = load_priv_key(id_key_file)?;
+    let id_ec_pub_key = SevEcdsaPubKey::try_from(&id_ec_priv_key)?;
     let serialized_id_block = id_block.to_bytes()?;
     let id_sig = SevEcdsaSig::try_from((id_ec_priv_key, serialized_id_block.as_slice()))?;
 
+    let author_ec_priv_key = load_priv_key(author_key_file)?;
     let author_pub_key = SevEcdsaPubKey::try_from(&author_ec_priv_key)?;
     let author_sig =
         SevEcdsaSig::try_from((author_ec_priv_key, id_ec_pub_key.to_bytes()?.as_slice()))?;
@@ -41,26 +44,22 @@ pub fn gen_id_auth_block_with_keys(
     ))
 }
 
-/// Generate an AUTH-BLOCK using 2 EC P-384 keys and an already calculated ID-BlOCK
-pub fn gen_id_auth_block_from_pubkey(
+/// Create an IdAuth struct from the given params
+pub fn auth_block(
     id_block: &IdBlock,
     id_ec_pub_key: SevEcdsaPubKey,
-    author_key_file: PathBuf,
+    id_sig: SevEcdsaSig,
+    author_ec_priv_key: EcKey<Private>
 ) -> Result<IdAuth, IdBlockError> {
-    let author_ec_priv_key = load_priv_key(author_key_file)?;
-    let author_pub_key = SevEcdsaPubKey::try_from(&author_ec_priv_key)?;
-    gen_id_auth_block_with_keys(id_block, id_ec_pub_key, author_ec_priv_key)
-}
+    let id_auth = IdAuth::default();
+    let id_key_algo = id_auth.id_key_algo;
+    let author_key_algo = id_auth.author_key_algo;
 
-/// Generate an AUTH-BLOCK using 2 EC P-384 keys and an already calculated ID-BlOCK
-pub fn gen_id_auth_block(
-    id_block: &IdBlock,
-    id_key_file: PathBuf,
-    author_key_file: PathBuf,
-) -> Result<IdAuth, IdBlockError> {
-    let id_ec_priv_key = load_priv_key(id_key_file)?;
-    let id_ec_pub_key = SevEcdsaPubKey::try_from(&id_ec_priv_key)?;
-    gen_id_auth_block_from_pubkey(id_block, id_ec_pub_key, author_key_file)
+    id_auth
+        .with_id_pubkey(id_ec_pub_key)?
+        .with_id_block_sig(id_key_algo, id_sig)?
+        .verify_id_block_sig(id_block)?
+        .sign_id_key(author_key_algo, author_ec_priv_key)
 }
 
 enum KeyFormat {
@@ -124,6 +123,11 @@ pub fn generate_key_digest(key_path: PathBuf) -> Result<SnpLaunchDigest, IdBlock
     Ok(SnpLaunchDigest::new(sha384(pub_key.to_bytes()?.as_slice())))
 }
 
+/// Generate the sha384 digest of the provided pem key (same sized digest as SNP Launch Digest)
+pub fn get_key_digest(pub_key: SevEcdsaPubKey) -> Result<SnpLaunchDigest, IdBlockError> {
+    Ok(SnpLaunchDigest::new(sha384(pub_key.to_bytes()?.as_slice())))
+}
+
 /// Calculate the different pieces needed for a complete pre-attestation.
 /// ID-BLOCK, AUTH-BLOCK, id-key digest and auth-key digest.
 pub fn snp_calculate_id(
@@ -144,5 +148,24 @@ pub fn snp_calculate_id(
         id_key_digest: generate_key_digest(id_key_file)?,
 
         auth_key_digest: generate_key_digest(auth_key_file)?,
+    })
+}
+
+
+/// Calculate the different pieces needed for a complete pre-attestation.
+/// ID-BLOCK, AUTH-BLOCK, id-key digest and auth-key digest.
+pub fn compile_id_measurements(
+    id_block: IdBlock,
+    id_sig: SevEcdsaSig,
+    id_ec_pub_key: SevEcdsaPubKey,
+    author_ec_priv_key: EcKey<Private>,
+) -> Result<IdMeasurements, IdBlockError>{
+    let author_ec_pub_key: SevEcdsaPubKey = SevEcdsaPubKey::try_from(&author_ec_priv_key)?;
+
+    Ok(IdMeasurements {
+        id_block: id_block,
+        id_auth: auth_block(&id_block, id_ec_pub_key, id_sig, author_ec_priv_key)?,
+        id_key_digest: get_key_digest(id_ec_pub_key)?,
+        auth_key_digest: get_key_digest(author_ec_pub_key)?,
     })
 }

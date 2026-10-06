@@ -32,6 +32,7 @@ use crate::util::parser_helper::{ReadExt, WriteExt};
 #[cfg(feature = "serde")]
 use serde::{Deserialize, Serialize};
 
+/// A 32 byte-buffer intended to hold a Sha256Hash
 pub type Sha256Hash = [u8; 32];
 
 /// GUID stored as little endian

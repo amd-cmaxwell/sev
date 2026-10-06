@@ -925,6 +925,12 @@ pub enum IdBlockError {
 
     /// Error when converting vector into array
     BadVectorError(usize, usize),
+
+    /// Error when a required field is missing in the ID block or AUTH block
+    MissingFieldError(String),
+
+    /// Error when an unsupported key algorithm is encountered
+    UnsupportedKeyAlgo(u32)
 }
 
 impl std::fmt::Display for IdBlockError {
@@ -945,6 +951,11 @@ impl std::fmt::Display for IdBlockError {
                 f,
                 "Bad vector length: Got {vec_size}, and expected: {expected}"
             ),
+            IdBlockError::MissingFieldError(field) => write!(
+                f,
+                "Missing required field in ID block or AUTH block: {field}"
+            ),
+            IdBlockError::UnsupportedKeyAlgo(algo) => write!(f, "Unsupported key algorithm encountered: {algo}"),
         }
     }
 }
