@@ -1,7 +1,8 @@
 [workspace]
 members = [
     "crates/lib/*",
-    "crates/ffi/*"
+    "crates/ffi/*",
+    "crates/sev"
 ]
 exclude = [
     "crates/ffi/tools",
