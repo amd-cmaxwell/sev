@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>UniFFI Math Demo</title>
+    <style>
+      :root {
+        --bg: #1a1a2e;
+        --surface: #16213e;
+        --border: #0f3460;
+        --text: #e0e0e0;
+        --muted: #8888aa;
+        --accent: #e94560;
+        --success: #4ecca3;
+        --error: #e94560;
+        --input-bg: #0f3460;
+      }
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body {
+        font-family: system-ui, -apple-system, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        line-height: 1.6;
+        padding: 2rem;
+        max-width: 900px;
+        margin: 0 auto;
+      }
+      h1 {
+        font-size: 1.8rem;
+        margin-bottom: 0.5rem;
+        color: var(--accent);
+      }
+      h1 span { color: var(--muted); font-weight: 300; }
+      .subtitle {
+        color: var(--muted);
+        margin-bottom: 2rem;
+        font-size: 0.9rem;
+      }
+      #loading {
+        text-align: center;
+        padding: 4rem 0;
+        color: var(--muted);
+        font-size: 1.1rem;
+      }
+      #app { display: none; }
+      section {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 1.25rem;
+        margin-bottom: 1rem;
+      }
+      section h2 {
+        font-size: 1.1rem;
+        margin-bottom: 0.75rem;
+        color: var(--accent);
+        border-bottom: 1px solid var(--border);
+        padding-bottom: 0.5rem;
+      }
+      .calc-row {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        margin-bottom: 0.5rem;
+        flex-wrap: wrap;
+      }
+      .calc-row label {
+        color: var(--muted);
+        font-size: 0.85rem;
+        min-width: 4rem;
+      }
+      input[type="number"], input[type="text"] {
+        background: var(--input-bg);
+        border: 1px solid var(--border);
+        border-radius: 4px;
+        color: var(--text);
+        padding: 0.35rem 0.5rem;
+        font-size: 0.9rem;
+        width: 5rem;
+        font-family: monospace;
+      }
+      input[type="text"] { width: 12rem; }
+      button {
+        background: var(--accent);
+        border: none;
+        border-radius: 4px;
+        color: white;
+        padding: 0.35rem 0.75rem;
+        font-size: 0.85rem;
+        cursor: pointer;
+        white-space: nowrap;
+      }
+      button:hover { opacity: 0.85; }
+      .result {
+        font-family: monospace;
+        color: var(--success);
+        font-size: 0.9rem;
+        padding: 0.25rem 0.5rem;
+        min-height: 1.5rem;
+      }
+      .result.error { color: var(--error); }
+      #test-panel {
+        margin-top: 2rem;
+      }
+      #test-panel summary {
+        cursor: pointer;
+        font-size: 1.1rem;
+        color: var(--accent);
+        padding: 0.5rem 0;
+      }
+      .test-group { margin: 0.5rem 0 0.5rem 1rem; }
+      .test-group-name {
+        font-weight: 600;
+        font-size: 0.95rem;
+        margin-bottom: 0.25rem;
+      }
+      .test-item {
+        font-size: 0.85rem;
+        font-family: monospace;
+        padding: 0.15rem 0;
+      }
+      .test-item.pass::before { content: "\2713 "; color: var(--success); }
+      .test-item.fail::before { content: "\2717 "; color: var(--error); }
+      .test-item.fail { color: var(--error); }
+      #test-summary {
+        font-size: 0.9rem;
+        margin-top: 0.5rem;
+        padding: 0.5rem;
+        border-radius: 4px;
+      }
+      #test-summary.all-pass { background: rgba(78, 204, 163, 0.15); color: var(--success); }
+      #test-summary.has-fail { background: rgba(233, 69, 96, 0.15); color: var(--error); }
+    </style>
+  </head>
+  <body>
+    <h1>UniFFI Math <span>wasm demo</span></h1>
+    <p class="subtitle">Rust math library compiled to WebAssembly via UniFFI, running in the browser</p>
+    <div id="loading">Loading WASM modules...</div>
+    <div id="app"></div>
+    <script type="module" src="/main.ts"></script>
+  </body>
+</html>

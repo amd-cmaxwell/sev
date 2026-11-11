@@ -1,0 +1,6 @@
+[bindings.go]
+go_mod = "github.com/virtee/sev/bindings/go"
+
+[bindings.python.external_packages]
+sev_types_ffi = "sev_types_ffi"
+

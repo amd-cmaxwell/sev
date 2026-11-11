@@ -1,0 +1,23 @@
+name: Check FFI Versions
+
+on:
+  workflow_call:
+    inputs:
+      ffi-libs:
+        required: false
+        type: string
+        default: ""
+        description: >
+          Space-separated list of FFI crate names (underscore-separated, e.g. "core trig").
+          If empty, all crates under crates/ffi/ are checked.
+
+jobs:
+  check-ffi-versions:
+    name: Check FFI crate versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assert FFI versions >= lib versions
+        shell: bash
+        run: ./scripts/check-ffi-versions.sh ${{ inputs.ffi-libs }}

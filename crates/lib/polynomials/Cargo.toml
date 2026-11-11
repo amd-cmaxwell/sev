@@ -1,0 +1,10 @@
+[package]
+name = "sev-polynomials"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Polynomial math operations"
+
+[dependencies]
+sev-core.workspace = true

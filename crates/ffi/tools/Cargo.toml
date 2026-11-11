@@ -1,0 +1,32 @@
+[package]
+name = "sev-tools"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+go-ffi = ["dep:uniffi-bindgen-go"]
+py-ffi = ["uniffi/cli"]
+wasm-ffi = ["dep:uniffi-bindgen-react-native", "dep:clap", "dep:anyhow"]
+ffi = ["go-ffi", "py-ffi", "wasm-ffi"]
+
+[dependencies]
+uniffi = { version = "0.31" }
+uniffi-bindgen-go = { git = "https://github.com/NordSecurity/uniffi-bindgen-go", tag = "v0.7.1+v0.31.0", optional = true }
+uniffi-bindgen-react-native = { git = "https://github.com/jhugman/uniffi-bindgen-react-native", tag = "0.31.0-6", optional = true }
+clap = { version = "4", features = ["derive"], optional = true }
+anyhow = { version = "1", optional = true }
+
+[[bin]]
+name = "uniffi-bindgen"
+path = "src/bin/uniffi-bindgen.rs"
+required-features = ["py-ffi"]
+
+[[bin]]
+name = "uniffi-bindgen-go"
+path = "src/bin/uniffi-bindgen-go.rs"
+required-features = ["go-ffi"]
+
+[[bin]]
+name = "uniffi-bindgen-react-native"
+path = "src/bin/uniffi-bindgen-react-native.rs"
+required-features = ["wasm-ffi"]

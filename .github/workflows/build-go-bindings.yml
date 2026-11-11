@@ -1,0 +1,94 @@
+name: Build Go Bindings
+
+on:
+  workflow_call:
+    inputs:
+      repo-owner:
+        required: true
+        type: string
+      repo-name:
+        required: true
+        type: string
+      pkg-suffix:
+        required: true
+        type: string
+      upload-artifacts:
+        required: false
+        type: boolean
+        default: false
+      ffi-libs:
+        required: false
+        type: string
+        default: "auto"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-go-bindings:
+    name: Go bindings (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        include:
+          - os: ubuntu-latest
+            cgo_os: linux
+            cgo_arch: amd64
+          - os: macos-latest
+            cgo_os: darwin
+            cgo_arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.21"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Cache uniffi-bindgen-go
+        id: cache-bindgen
+        uses: actions/cache@v4
+        with:
+          path: .tools/bin/uniffi-bindgen-go
+          key: uniffi-bindgen-go-${{ runner.os }}-${{ hashFiles('crates/ffi/tools/Cargo.toml') }}
+
+      - name: Install uniffi-bindgen-go
+        if: steps.cache-bindgen.outputs.cache-hit != 'true'
+        run: make build-tools-go
+        shell: bash
+
+      - name: Add tools to PATH
+        run: echo "${{ github.workspace }}/.tools/bin" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Generate Go bindings
+        run: |
+          echo "::notice::Inputs — REPO_OWNER=${{ inputs.repo-owner }} REPO_NAME=${{ inputs.repo-name }} PKG_SUFFIX=${{ inputs.pkg-suffix }} FFI_LIBS=${{ inputs.ffi-libs }}"
+          echo "::notice::Target — CGO_OS=${{ matrix.cgo_os }} CGO_ARCH=${{ matrix.cgo_arch }}"
+          make generate-go
+        env:
+          REPO_OWNER: ${{ inputs.repo-owner }}
+          REPO_NAME: ${{ inputs.repo-name }}
+          PKG_SUFFIX: ${{ inputs.pkg-suffix }}
+          CGO_OS: ${{ matrix.cgo_os }}
+          CGO_ARCH: ${{ matrix.cgo_arch }}
+          FFI_LIBS: ${{ inputs.ffi-libs }}
+
+      - name: List generated artifacts
+        if: inputs.upload-artifacts
+        shell: bash
+        run: |
+          echo "::group::Go bindings"
+          (find bindings/go/ -type f \( -name '*.go' -o -name '*.h' -o -name 'go.mod' \) || true) | head -50 || echo "::warning::No Go bindings found"
+          echo "::endgroup::"
+
+      - uses: actions/upload-artifact@v4
+        if: inputs.upload-artifacts
+        with:
+          name: go-bindings-${{ matrix.cgo_os }}-${{ matrix.cgo_arch }}
+          path: bindings/go/

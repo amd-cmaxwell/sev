@@ -1,0 +1,105 @@
+name: Build Python Bindings
+
+on:
+  workflow_call:
+    inputs:
+      repo-owner:
+        required: true
+        type: string
+      repo-name:
+        required: true
+        type: string
+      pkg-suffix:
+        required: true
+        type: string
+      upload-artifacts:
+        required: false
+        type: boolean
+        default: false
+      ffi-libs:
+        required: false
+        type: string
+        default: "auto"
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build-python-bindings:
+    name: Python bindings (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            cgo_os: linux
+            cgo_arch: amd64
+          - os: macos-latest
+            cgo_os: darwin
+            cgo_arch: arm64
+          - os: windows-latest
+            cgo_os: windows
+            cgo_arch: amd64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install maturin
+
+      - name: Cache uniffi-bindgen
+        id: cache-bindgen
+        uses: actions/cache@v4
+        with:
+          path: .tools/bin/uniffi-bindgen*
+          key: uniffi-bindgen-py-${{ runner.os }}-${{ hashFiles('crates/ffi/tools/Cargo.toml') }}
+
+      - name: Install uniffi-bindgen
+        if: steps.cache-bindgen.outputs.cache-hit != 'true'
+        run: make build-tools-py
+        shell: bash
+
+      - name: Add tools to PATH
+        run: echo "${{ github.workspace }}/.tools/bin" >> $GITHUB_PATH
+        shell: bash
+
+      - name: Generate Python bindings
+        run: |
+          echo "::notice::Inputs — REPO_OWNER=${{ inputs.repo-owner }} REPO_NAME=${{ inputs.repo-name }} PKG_SUFFIX=${{ inputs.pkg-suffix }} FFI_LIBS=${{ inputs.ffi-libs }}"
+          make generate-python
+        shell: bash
+        env:
+          REPO_OWNER: ${{ inputs.repo-owner }}
+          REPO_NAME: ${{ inputs.repo-name }}
+          PKG_SUFFIX: ${{ inputs.pkg-suffix }}
+          FFI_LIBS: ${{ inputs.ffi-libs }}
+
+      - name: List generated artifacts
+        if: inputs.upload-artifacts
+        shell: bash
+        run: |
+          echo "::group::Python bindings"
+          (find bindings/python/ -type f -name '*.py' || true) | head -50 || echo "::warning::No Python bindings found"
+          echo "::endgroup::"
+          echo "::group::Python wheels"
+          ls -lh dist/pypi/*.whl 2>/dev/null || echo "::warning::No wheels found in dist/pypi/"
+          echo "::endgroup::"
+
+      # Generated Python source — committed to the repo by the publish-bindings job
+      - uses: actions/upload-artifact@v4
+        if: inputs.upload-artifacts
+        with:
+          name: python-bindings-${{ matrix.cgo_os }}-${{ matrix.cgo_arch }}
+          path: bindings/python/
+
+      # Compiled wheels — attached to the GitHub Release as downloadable assets
+      - uses: actions/upload-artifact@v4
+        if: inputs.upload-artifacts
+        with:
+          name: wheel-${{ matrix.os }}
+          path: dist/pypi/*.whl

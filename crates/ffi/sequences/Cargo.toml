@@ -1,0 +1,20 @@
+[package]
+name = "sev-sequences-ffi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UniFFI bindings for sev-sequences"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+name = "sev_sequences_ffi"
+
+[features]
+wasm = ["uniffi/wasm-unstable-single-threaded", "uniffi/scaffolding-ffi-buffer-fns", "dep:uniffi-runtime-wasm", "sev-types-ffi/wasm"]
+
+[dependencies]
+uniffi.workspace = true
+uniffi-runtime-wasm = { workspace = true, optional = true }
+sev-sequences.workspace = true
+sev-types-ffi.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "sev-trig-ffi"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "UniFFI bindings for sev-trig"
+
+[lib]
+crate-type = ["cdylib", "staticlib", "lib"]
+name = "sev_trig_ffi"
+
+[features]
+wasm = ["uniffi/wasm-unstable-single-threaded", "uniffi/scaffolding-ffi-buffer-fns", "dep:uniffi-runtime-wasm", "sev-types-ffi/wasm"]
+
+[dependencies]
+uniffi.workspace = true
+uniffi-runtime-wasm = { workspace = true, optional = true }
+sev-trig.workspace = true
+sev-types-ffi.workspace = true

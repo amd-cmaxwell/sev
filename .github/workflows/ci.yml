@@ -1,0 +1,145 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-ffi-coverage:
+    name: Check FFI coverage
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Check library changes have FFI updates
+        run: |
+          echo "::notice::Checking FFI coverage: origin/${{ github.base_ref }}...${{ github.sha }}"
+          ./scripts/check-ffi-coverage.sh origin/${{ github.base_ref }} ${{ github.sha }}
+
+  check-ffi-versions:
+    name: Check FFI crate versions
+    uses: ./.github/workflows/check-ffi-versions.yml
+
+  check-workspace-versions:
+    name: Check workspace dependency versions
+    uses: ./.github/workflows/check-workspace-versions.yml
+
+  rust-test:
+    name: Rust tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace
+
+  build-python-bindings:
+    name: Build Python Bindings
+    needs: [rust-test, check-ffi-versions, check-workspace-versions]
+    uses: ./.github/workflows/build-python-bindings.yml
+    with:
+      repo-owner: ${{ vars.REPO_OWNER }}
+      repo-name: ${{ vars.REPO_NAME }}
+      pkg-suffix: ${{ vars.PKG_SUFFIX }}
+      upload-artifacts: true
+
+  build-go-bindings:
+    name: Build Go Bindings
+    needs: [rust-test, check-ffi-versions, check-workspace-versions]
+    uses: ./.github/workflows/build-go-bindings.yml
+    with:
+      repo-owner: ${{ vars.REPO_OWNER }}
+      repo-name: ${{ vars.REPO_NAME }}
+      pkg-suffix: ${{ vars.PKG_SUFFIX }}
+      upload-artifacts: true
+
+  build-js-bindings:
+    name: Build JS Bindings
+    needs: [rust-test, check-ffi-versions, check-workspace-versions]
+    uses: ./.github/workflows/build-js-bindings.yml
+    with:
+      repo-owner: ${{ vars.REPO_OWNER }}
+      repo-name: ${{ vars.REPO_NAME }}
+      pkg-suffix: ${{ vars.PKG_SUFFIX }}
+      upload-artifacts: true
+
+  test-python-bindings:
+    name: Test Python bindings
+    needs: build-python-bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: wheel-ubuntu-latest
+          path: dist/pypi/
+
+      - name: Install wheels and run smoke test
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install dist/pypi/*.whl
+          .venv/bin/python examples/py-demo
+
+  test-go-bindings:
+    name: Test Go bindings
+    needs: build-go-bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: go-bindings-linux-amd64
+          path: bindings/go/
+
+      - name: Run smoke test
+        run: |
+          cd examples/go-demo
+          for pkg_dir in ../../bindings/go/*/; do
+            [ -f "$pkg_dir/go.mod" ] || continue
+            mod_path=$(head -1 "$pkg_dir/go.mod" | awk '{print $2}')
+            go mod edit -require="$mod_path@v0.0.0" -replace="$mod_path=$(cd "$pkg_dir" && pwd)"
+          done
+          go run main.go
+
+  test-js-bindings:
+    name: Test JS bindings
+    needs: build-js-bindings
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarballs
+          path: dist/npm/
+
+      - name: Install tarballs and run smoke test
+        run: |
+          cd examples/js-demo
+          for tgz in ../../dist/npm/*.tgz; do
+            echo "Installing $(basename "$tgz")"
+            npm install "$tgz"
+          done
+          node main.mjs

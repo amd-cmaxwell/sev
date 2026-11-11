@@ -1,0 +1,23 @@
+name: Check workspace dependency versions
+
+on:
+  workflow_call:
+    inputs:
+      ffi-libs:
+        required: false
+        type: string
+        default: ""
+        description: >
+          Space-separated list of FFI crate names (underscore-separated, e.g. "core trig").
+          If empty, all crates under crates/lib/ and crates/ffi/ are checked.
+
+jobs:
+  check-workspace-versions:
+    name: Check workspace versions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Verify workspace dependency versions match crate versions
+        shell: bash
+        run: ./scripts/check-workspace-versions.sh ${{ inputs.ffi-libs }}

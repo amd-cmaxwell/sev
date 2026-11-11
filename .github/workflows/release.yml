@@ -1,0 +1,622 @@
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      crates:
+        description: 'Space-separated list of lib crates to release (e.g. "core trig"). Leave empty for all changed.'
+        required: false
+        default: ''
+      ffi-libs:
+        description: 'Space-separated list of FFI libs to release (e.g. "core trig"). Leave empty for all changed.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  REPO_OWNER: ${{ vars.REPO_OWNER }}
+  REPO_NAME: ${{ vars.REPO_NAME }}
+  PKG_SUFFIX: ${{ vars.PKG_SUFFIX }}
+  NPM_SCOPE: ${{ vars.NPM_SCOPE }}
+
+jobs:
+  ci-gate:
+    name: Verify CI passed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check CI status on HEAD
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha="${{ github.sha }}"
+          echo "::notice::Checking CI workflow status for ${sha}"
+          result=$(gh run list \
+            --repo="${{ github.repository }}" \
+            --workflow=ci.yml \
+            --commit="$sha" \
+            --status=completed \
+            --json conclusion \
+            --jq '[.[] | .conclusion] |
+              if length == 0 then "none"
+              elif all(. == "success" or . == "skipped") then "pass"
+              else "fail" end')
+          if [ "$result" = "none" ]; then
+            echo "::error::No completed CI runs found for commit ${sha}. Push to main and wait for CI to pass before releasing."
+            exit 1
+          elif [ "$result" != "pass" ]; then
+            echo "::error::CI has not passed on commit ${sha}. Fix CI before releasing."
+            exit 1
+          fi
+          echo "::notice::CI passed on ${sha}"
+
+  detect-changes:
+    name: Detect changed crates
+    needs: ci-gate
+    runs-on: ubuntu-latest
+    outputs:
+      ffi-libs: ${{ steps.diff.outputs.ffi_libs }}
+      has-ffi-changes: ${{ steps.diff.outputs.has_ffi_changes }}
+      crate-versions: ${{ steps.diff.outputs.crate_versions }}
+      has-crate-changes: ${{ steps.diff.outputs.has_crate_changes }}
+      pre-existing-tags: ${{ steps.snapshot-tags.outputs.tags }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Snapshot pre-existing tags
+        id: snapshot-tags
+        shell: bash
+        run: |
+          tags=$(git ls-remote --tags origin | awk '{print $2}' | sed 's|refs/tags/||' | tr '\n' ' ')
+          echo "tags=${tags}" >> "$GITHUB_OUTPUT"
+
+      - name: Find changed crates since last release
+        id: diff
+        shell: bash
+        env:
+          INPUT_CRATES: ${{ inputs.crates }}
+          INPUT_FFI_LIBS: ${{ inputs.ffi-libs }}
+        run: |
+          set -euo pipefail
+
+          # Look up the most recent tag for a given crate path prefix
+          latest_tag_for() {
+            local prefix="$1"
+            git tag --list "${prefix}/v*" --sort=-v:refname | head -1
+          }
+
+          # Extract the version at a given tag, or empty if the tag/file doesn't exist
+          version_at_tag() {
+            local tag="$1" toml="$2"
+            if [ -z "$tag" ]; then
+              echo ""
+            else
+              git show "${tag}:${toml}" 2>/dev/null | grep '^version' | head -1 | sed 's/.*"\(.*\)"/\1/' || echo ""
+            fi
+          }
+
+          # Build filter sets from inputs (empty = all)
+          filter_crates=()
+          if [ -n "$INPUT_CRATES" ]; then
+            for c in $INPUT_CRATES; do
+              filter_crates+=("$(echo "$c" | tr '_' '-')")
+            done
+            echo "::notice::Filtering lib crates: ${filter_crates[*]}"
+          fi
+
+          filter_ffi=()
+          if [ -n "$INPUT_FFI_LIBS" ]; then
+            for f in $INPUT_FFI_LIBS; do
+              filter_ffi+=("$(echo "$f" | tr '_' '-')")
+            done
+            echo "::notice::Filtering FFI libs: ${filter_ffi[*]}"
+          fi
+
+          in_filter() {
+            local needle="$1"; shift
+            if [ $# -eq 0 ]; then return 0; fi
+            for item in "$@"; do
+              [ "$item" = "$needle" ] && return 0
+            done
+            return 1
+          }
+
+          # Pass 1: Library crates — always produce a release when changed
+          changed_libs=()
+          crate_json="{"
+          first=true
+
+          for toml in crates/lib/*/Cargo.toml; do
+            [ -f "$toml" ] || continue
+            crate_path=$(dirname "$toml")
+            crate_dir=$(basename "$crate_path")
+
+            in_filter "$crate_dir" "${filter_crates[@]}" || continue
+
+            tag_path="crates/${crate_dir}"
+            prev_tag=$(latest_tag_for "${tag_path}")
+            cur_ver=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+            prev_ver=$(version_at_tag "$prev_tag" "$toml")
+
+            if [ "$cur_ver" != "$prev_ver" ]; then
+              echo "::notice::Library crate changed: ${crate_path} ${prev_ver:-<new>} -> ${cur_ver} (prev tag: ${prev_tag:-none})"
+              changed_libs+=("$crate_dir")
+              $first || crate_json+=","
+              crate_json+="\"${tag_path}\":\"${cur_ver}\""
+              first=false
+            fi
+          done
+
+          # Pass 2: FFI crates — always tracked for binding generation,
+          # but only produce a release if the corresponding lib crate didn't change
+          ffi_changed=()
+
+          for toml in crates/ffi/*/Cargo.toml; do
+            [ -f "$toml" ] || continue
+            crate_path=$(dirname "$toml")
+            crate_dir=$(basename "$crate_path")
+            [ "$crate_dir" = "tools" ] && continue
+
+            in_filter "$crate_dir" "${filter_ffi[@]}" || continue
+
+            prev_tag=$(latest_tag_for "${crate_path}")
+            cur_ver=$(grep '^version' "$toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+            prev_ver=$(version_at_tag "$prev_tag" "$toml")
+
+            if [ "$cur_ver" != "$prev_ver" ]; then
+              # No previous FFI tag means this is the first time seeing this crate;
+              # only treat it as changed if the corresponding lib crate also changed
+              # (i.e. version was set during initial release, not an independent FFI change)
+              if [ -z "$prev_tag" ] && [ -f "crates/lib/${crate_dir}/Cargo.toml" ]; then
+                lib_in_changed=false
+                for lib in "${changed_libs[@]}"; do
+                  if [ "$lib" = "$crate_dir" ]; then lib_in_changed=true; break; fi
+                done
+                if ! $lib_in_changed; then
+                  echo "::notice::FFI crate has no previous tag and lib unchanged: ${crate_path} ${cur_ver} (skipped)"
+                  continue
+                fi
+              fi
+
+              ffi_changed+=("$(echo "$crate_dir" | tr '-' '_')")
+
+              # Only add to release map if the lib crate didn't already change
+              lib_already_changed=false
+              for lib in "${changed_libs[@]}"; do
+                if [ "$lib" = "$crate_dir" ]; then
+                  lib_already_changed=true
+                  break
+                fi
+              done
+              if $lib_already_changed; then
+                echo "::notice::FFI crate changed: ${crate_path} ${prev_ver:-<new>} -> ${cur_ver} (covered by lib crate release)"
+              else
+                echo "::notice::FFI-only crate changed: ${crate_path} ${prev_ver:-<new>} -> ${cur_ver} (prev tag: ${prev_tag:-none})"
+                $first || crate_json+=","
+                crate_json+="\"${crate_path}\":\"${cur_ver}\""
+                first=false
+              fi
+            fi
+          done
+
+          crate_json+="}"
+
+          if [ ${#ffi_changed[@]} -gt 0 ]; then
+            echo "ffi_libs=${ffi_changed[*]}" >> "$GITHUB_OUTPUT"
+            echo "has_ffi_changes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No FFI crate version changes detected"
+            echo "ffi_libs=" >> "$GITHUB_OUTPUT"
+            echo "has_ffi_changes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          echo "crate_versions=${crate_json}" >> "$GITHUB_OUTPUT"
+          if [ "$crate_json" = "{}" ]; then
+            echo "::notice::No crate version changes detected"
+            echo "has_crate_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::crate-versions=${crate_json}"
+            echo "has_crate_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+          if [ "$crate_json" = "{}" ] && [ ${#ffi_changed[@]} -eq 0 ]; then
+            echo "::error::No Rust crate or FFI changes detected — nothing to release"
+            exit 1
+          fi
+
+  check-ffi-versions:
+    name: Check FFI crate versions
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has-ffi-changes == 'true'
+    uses: ./.github/workflows/check-ffi-versions.yml
+    with:
+      ffi-libs: ${{ needs.detect-changes.outputs.ffi-libs }}
+
+  check-workspace-versions:
+    name: Check workspace dependency versions
+    needs: detect-changes
+    if: needs.detect-changes.outputs.has-crate-changes == 'true'
+    uses: ./.github/workflows/check-workspace-versions.yml
+    with:
+      ffi-libs: ${{ needs.detect-changes.outputs.ffi-libs }}
+
+  build-python-bindings:
+    name: Build Python bindings
+    needs: [detect-changes, check-ffi-versions, check-workspace-versions]
+    if: |
+      !failure() && !cancelled() &&
+      needs.detect-changes.outputs.has-ffi-changes == 'true'
+    uses: ./.github/workflows/build-python-bindings.yml
+    with:
+      repo-owner: ${{ vars.REPO_OWNER }}
+      repo-name: ${{ vars.REPO_NAME }}
+      pkg-suffix: ${{ vars.PKG_SUFFIX }}
+      upload-artifacts: true
+      ffi-libs: ${{ needs.detect-changes.outputs.ffi-libs }}
+
+  build-go-bindings:
+    name: Build Go bindings
+    needs: [detect-changes, check-ffi-versions, check-workspace-versions]
+    if: |
+      !failure() && !cancelled() &&
+      needs.detect-changes.outputs.has-ffi-changes == 'true'
+    uses: ./.github/workflows/build-go-bindings.yml
+    with:
+      repo-owner: ${{ vars.REPO_OWNER }}
+      repo-name: ${{ vars.REPO_NAME }}
+      pkg-suffix: ${{ vars.PKG_SUFFIX }}
+      upload-artifacts: true
+      ffi-libs: ${{ needs.detect-changes.outputs.ffi-libs }}
+
+  build-js-bindings:
+    name: Build JS bindings
+    needs: [detect-changes, check-ffi-versions, check-workspace-versions]
+    if: |
+      !failure() && !cancelled() &&
+      needs.detect-changes.outputs.has-ffi-changes == 'true'
+    uses: ./.github/workflows/build-js-bindings.yml
+    with:
+      repo-owner: ${{ vars.REPO_OWNER }}
+      repo-name: ${{ vars.REPO_NAME }}
+      pkg-suffix: ${{ vars.PKG_SUFFIX }}
+      upload-artifacts: true
+      make-target: generate-js
+      ffi-libs: ${{ needs.detect-changes.outputs.ffi-libs }}
+
+  publish-bindings:
+    name: Publish bindings
+    needs: [detect-changes, build-go-bindings, build-python-bindings, build-js-bindings]
+    if: needs.detect-changes.outputs.has-ffi-changes == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      bindings-commit: ${{ steps.commit-bindings.outputs.commit_sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Derive FFI modules
+        shell: bash
+        run: |
+          set -euo pipefail
+          repo_us=$(echo "$REPO_NAME" | tr '-' '_')
+          suffix_us=$(echo "$PKG_SUFFIX" | tr '-' '_')
+          npm_scope="${NPM_SCOPE:-@${REPO_OWNER}}"
+          ffi_modules="${{ needs.detect-changes.outputs.ffi-libs }}"
+          echo "REPO_NAME_US=${repo_us}" >> "$GITHUB_ENV"
+          echo "PKG_SUFFIX_US=${suffix_us}" >> "$GITHUB_ENV"
+          echo "NPM_SCOPE=${npm_scope}" >> "$GITHUB_ENV"
+          echo "FFI_MODULES=${ffi_modules}" >> "$GITHUB_ENV"
+          echo "::notice::REPO_NAME_US=${repo_us} PKG_SUFFIX_US=${suffix_us} NPM_SCOPE=${npm_scope}"
+          echo "::notice::FFI_MODULES=${ffi_modules}"
+
+      - name: Download Go binding artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bindings/go
+          pattern: go-bindings-*
+          merge-multiple: true
+
+      - name: Download Python binding artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: bindings/python
+          pattern: python-bindings-*
+          merge-multiple: true
+
+      - name: Download JS binding artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: js-bindings
+          path: bindings/js
+
+      - name: Commit FFI bindings to bindings branch
+        id: commit-bindings
+        shell: bash
+        env:
+          CRATE_VERSIONS: ${{ needs.detect-changes.outputs.crate-versions }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          main_sha=$(git rev-parse HEAD)
+
+          # Checkout or create the bindings branch
+          if git ls-remote --exit-code origin bindings >/dev/null 2>&1; then
+            git fetch origin bindings:bindings
+            git checkout bindings
+          else
+            echo "::notice::Creating bindings branch for the first time"
+            git checkout -b bindings
+          fi
+
+          # Merge main into bindings
+          git merge main --no-edit
+
+          # Stage bindings (force-add past .gitignore)
+          git add -f bindings/go/ bindings/python/
+          git add -f bindings/js/package.json bindings/js/pnpm-workspace.yaml
+          for pkg_dir in bindings/js/"${NPM_SCOPE}"/*/; do
+            [ -d "$pkg_dir" ] || continue
+            git add -f "${pkg_dir}package.json" "${pkg_dir}tsconfig.json" 2>/dev/null || true
+            [ -d "${pkg_dir}src" ] && git add -f "${pkg_dir}src/"
+            [ -d "${pkg_dir}dist" ] && git add -f "${pkg_dir}dist/"
+          done
+
+          if git diff --cached --quiet; then
+            echo "::error::No binding changes to commit — expected bindings to be generated"
+            exit 1
+          else
+            summary=$(echo "$CRATE_VERSIONS" | jq -r 'to_entries | map("\(.key) v\(.value)") | join(", ")')
+            echo "::notice::Committing bindings for: ${summary}"
+            SKIP_BINDINGS_CHECK=1 git commit -m "chore: generate bindings for ${summary}"
+            commit_sha=$(git rev-parse HEAD)
+            echo "commit_sha=${commit_sha}" >> "$GITHUB_OUTPUT"
+            git push origin bindings
+          fi
+
+      - name: Tag bindings commit
+        if: steps.commit-bindings.outputs.commit_sha != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          for mod in ${FFI_MODULES}; do
+            crate_dir=$(echo "$mod" | tr '_' '-')
+            version=$(grep '^version' "crates/ffi/${crate_dir}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+            if [ -z "$version" ]; then
+              echo "::error::Could not parse version from crates/ffi/${crate_dir}/Cargo.toml"
+              exit 1
+            fi
+
+            # ffi/{name}/vX.Y.Z for pip/pnpm consumers
+            ffi_tag="ffi/${crate_dir}/v${version}"
+            if git rev-parse "${ffi_tag}" >/dev/null 2>&1; then
+              echo "::error::Tag ${ffi_tag} already exists"
+              exit 1
+            fi
+            echo "::notice::Tagging bindings: ${ffi_tag}"
+            git tag "${ffi_tag}"
+
+            # bindings/go/{pkg}/vX.Y.Z for Go modules
+            pkg="${REPO_NAME_US}_${mod}${PKG_SUFFIX_US}"
+            go_tag="bindings/go/${pkg}/v${version}"
+            if git rev-parse "${go_tag}" >/dev/null 2>&1; then
+              echo "::error::Tag ${go_tag} already exists"
+              exit 1
+            fi
+            echo "::notice::Tagging Go module: ${go_tag}"
+            git tag "${go_tag}"
+          done
+
+          git push origin --tags
+
+  release-rust-crates:
+    name: Release Rust crates
+    needs: [detect-changes, publish-bindings]
+    if: needs.detect-changes.outputs.has-crate-changes == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@v4
+        with:
+          path: wheels
+          pattern: wheel-*
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: npm-tarballs
+          path: npm-tarballs
+
+      - name: Create per-crate releases
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CRATE_VERSIONS: ${{ needs.detect-changes.outputs.crate-versions }}
+          BINDINGS_COMMIT: ${{ needs.publish-bindings.outputs.bindings-commit }}
+        run: |
+          set -euo pipefail
+          repo_us=$(echo "$REPO_NAME" | tr '-' '_')
+          suffix_us=$(echo "$PKG_SUFFIX" | tr '-' '_')
+          echo "::notice::Artifact matching patterns — wheels: *\${repo_us}_\${crate_us}\${suffix_us}* | tarballs: *\${REPO_NAME}-\${crate_dir}\${PKG_SUFFIX}*"
+          echo "::notice::Available wheels:"
+          ls -1 wheels/ 2>/dev/null || echo "::warning::wheels/ directory not found"
+          echo "::notice::Available npm tarballs:"
+          ls -1 npm-tarballs/ 2>/dev/null || echo "::warning::npm-tarballs/ directory not found"
+
+          tags=()
+          for crate_path in $(echo "$CRATE_VERSIONS" | jq -r 'keys[]'); do
+            cur_ver=$(echo "$CRATE_VERSIONS" | jq -r --arg k "$crate_path" '.[$k]')
+            crate_dir=$(basename "$crate_path")
+            tag="${crate_path}/v${cur_ver}"
+            if git rev-parse "${tag}" >/dev/null 2>&1; then
+              echo "::error::Tag ${tag} already exists"
+              exit 1
+            fi
+            git tag "${tag}"
+            git push origin "${tag}"
+
+            crate_us=$(echo "$crate_dir" | tr '-' '_')
+            wheel_pattern="${repo_us}_${crate_us}${suffix_us}"
+            tarball_pattern="${REPO_NAME}-${crate_dir}${PKG_SUFFIX}"
+            assets=()
+            while IFS= read -r f; do
+              [ -n "$f" ] && assets+=("$f")
+            done < <(find wheels/ -name "*${wheel_pattern}*" -type f 2>/dev/null)
+            while IFS= read -r f; do
+              [ -n "$f" ] && assets+=("$f")
+            done < <(find npm-tarballs/ -name "*${tarball_pattern}*" -type f 2>/dev/null)
+
+            if [ ${#assets[@]} -eq 0 ]; then
+              echo "::warning::No artifacts matched for ${crate_path} (wheel: *${wheel_pattern}*, tarball: *${tarball_pattern}*)"
+            fi
+            echo "::notice::Releasing ${tag} with ${#assets[@]} artifact(s): ${assets[*]:-<none>}"
+
+            case "$crate_path" in
+              crates/ffi/*) title="${REPO_NAME}-${crate_dir}-ffi v${cur_ver}" ;;
+              *)            title="${REPO_NAME}-${crate_dir} v${cur_ver}" ;;
+            esac
+
+            echo "::group::Release ${tag}"
+            echo "::notice::Title: ${title}"
+            echo "::notice::Assets: ${assets[*]:-<none>}"
+
+            echo "::notice::Generating release body..."
+            if ! body=$(./scripts/release-body.sh "${tag}" "${assets[@]}"); then
+              echo "::error::release-body.sh failed for ${tag}"
+              exit 1
+            fi
+
+            if [ -n "$body" ]; then
+              echo "::notice::Release body:"
+              echo "$body"
+              gh release create "${tag}" "${assets[@]}" \
+                --title "$title" \
+                --notes "$body"
+            else
+              echo "::notice::No release body generated, using auto-generated notes"
+              gh release create "${tag}" "${assets[@]}" \
+                --title "$title" \
+                --generate-notes
+            fi
+            echo "::endgroup::"
+          done
+
+  rollback:
+    name: Rollback on failure
+    needs: [detect-changes, publish-bindings, release-rust-crates]
+    if: failure()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Delete GitHub releases and crate tags
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CRATE_VERSIONS: ${{ needs.detect-changes.outputs.crate-versions }}
+          PRE_EXISTING_TAGS: ${{ needs.detect-changes.outputs.pre-existing-tags }}
+        run: |
+          set -uo pipefail
+          if [ -z "$CRATE_VERSIONS" ] || [ "$CRATE_VERSIONS" = "{}" ]; then
+            echo "::notice::No crate versions to roll back"
+            exit 0
+          fi
+          for crate_path in $(echo "$CRATE_VERSIONS" | jq -r 'keys[]'); do
+            cur_ver=$(echo "$CRATE_VERSIONS" | jq -r --arg k "$crate_path" '.[$k]')
+            tag="${crate_path}/v${cur_ver}"
+            if echo " $PRE_EXISTING_TAGS " | grep -qF " ${tag} "; then
+              echo "::notice::Skipping pre-existing tag ${tag}"
+              continue
+            fi
+            if gh release view "${tag}" >/dev/null 2>&1; then
+              echo "::notice::Deleting release ${tag}"
+              gh release delete "${tag}" --yes --cleanup-tag || true
+            elif git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
+              echo "::notice::Deleting remote tag ${tag}"
+              git push origin --delete "${tag}" || true
+            fi
+          done
+
+      - name: Delete Go module tags
+        shell: bash
+        env:
+          FFI_LIBS: ${{ needs.detect-changes.outputs.ffi-libs }}
+          PRE_EXISTING_TAGS: ${{ needs.detect-changes.outputs.pre-existing-tags }}
+        run: |
+          set -uo pipefail
+          repo_us=$(echo "$REPO_NAME" | tr '-' '_')
+          suffix_us=$(echo "$PKG_SUFFIX" | tr '-' '_')
+          if [ -z "$FFI_LIBS" ]; then
+            echo "::notice::No Go module tags to roll back"
+            exit 0
+          fi
+          for mod in $FFI_LIBS; do
+            crate_dir=$(echo "$mod" | tr '_' '-')
+            pkg="${repo_us}_${mod}${suffix_us}"
+            version=$(grep '^version' "crates/ffi/${crate_dir}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+            tag="bindings/go/${pkg}/v${version}"
+            if echo " $PRE_EXISTING_TAGS " | grep -qF " ${tag} "; then
+              echo "::notice::Skipping pre-existing tag ${tag}"
+              continue
+            fi
+            if git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
+              echo "::notice::Deleting Go module tag ${tag}"
+              git push origin --delete "${tag}" || true
+            fi
+          done
+
+      - name: Delete FFI bindings tags
+        shell: bash
+        env:
+          FFI_LIBS: ${{ needs.detect-changes.outputs.ffi-libs }}
+          PRE_EXISTING_TAGS: ${{ needs.detect-changes.outputs.pre-existing-tags }}
+        run: |
+          set -uo pipefail
+          if [ -z "$FFI_LIBS" ]; then
+            echo "::notice::No FFI bindings tags to roll back"
+            exit 0
+          fi
+          for mod in $FFI_LIBS; do
+            crate_dir=$(echo "$mod" | tr '_' '-')
+            version=$(grep '^version' "crates/ffi/${crate_dir}/Cargo.toml" | head -1 | sed 's/.*"\(.*\)"/\1/')
+            tag="ffi/${crate_dir}/v${version}"
+            if echo " $PRE_EXISTING_TAGS " | grep -qF " ${tag} "; then
+              echo "::notice::Skipping pre-existing tag ${tag}"
+              continue
+            fi
+            if git ls-remote --tags origin "refs/tags/${tag}" | grep -q .; then
+              echo "::notice::Deleting FFI bindings tag ${tag}"
+              git push origin --delete "${tag}" || true
+            fi
+          done
+
+      - name: Reset bindings branch
+        shell: bash
+        env:
+          BINDINGS_COMMIT: ${{ needs.publish-bindings.outputs.bindings-commit }}
+        run: |
+          set -uo pipefail
+          if [ -z "$BINDINGS_COMMIT" ]; then
+            echo "::notice::No bindings commit to revert"
+            exit 0
+          fi
+          git fetch origin bindings
+          head_sha=$(git rev-parse origin/bindings)
+          if [ "$head_sha" != "$BINDINGS_COMMIT" ]; then
+            echo "::error::bindings branch HEAD (${head_sha}) is not the expected commit (${BINDINGS_COMMIT}) — skipping reset to avoid data loss"
+            exit 1
+          fi
+          echo "::notice::Resetting bindings branch to ${BINDINGS_COMMIT}~1"
+          git push origin --force-with-lease "${BINDINGS_COMMIT}~1:refs/heads/bindings"

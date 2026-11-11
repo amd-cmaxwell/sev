@@ -1,0 +1,11 @@
+{
+  "private": true,
+  "name": "js-demo",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test main.mjs"
+  }
+}
